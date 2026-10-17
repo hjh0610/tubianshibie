@@ -1,0 +1,4 @@
+# 在此文件中填写你的阿里云 DashScope API Key
+# 获取地址：https://dashscope.console.aliyun.com/
+
+DASHSCOPE_API_KEY=sk-cbbb0fa7de7745569a30f54763a22c45

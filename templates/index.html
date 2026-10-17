@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>文物/艺术品图片识别系统</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Microsoft YaHei', 'Segoe UI', Tahoma, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2.2em;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1em;
+        }
+
+        .upload-area {
+            border: 3px dashed #667eea;
+            border-radius: 15px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin-bottom: 20px;
+        }
+
+        .upload-area:hover {
+            background-color: #f0f4ff;
+            border-color: #764ba2;
+        }
+
+        .upload-area.dragover {
+            background-color: #e8eeff;
+            border-color: #764ba2;
+        }
+
+        .upload-icon {
+            font-size: 4em;
+            margin-bottom: 15px;
+        }
+
+        .upload-text {
+            color: #666;
+            font-size: 1.1em;
+        }
+
+        .upload-text span {
+            color: #667eea;
+            font-weight: bold;
+        }
+
+        #fileInput {
+            display: none;
+        }
+
+        .preview-container {
+            display: none;
+            margin: 20px 0;
+            text-align: center;
+        }
+
+        .preview-container.show {
+            display: block;
+        }
+
+        #imagePreview {
+            max-width: 100%;
+            max-height: 400px;
+            border-radius: 10px;
+            box-shadow: 0 5px 20px rgba(0, 0, 0, 0.2);
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 40px;
+            font-size: 1.1em;
+            border-radius: 30px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: block;
+            margin: 20px auto;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .result-container {
+            display: none;
+            margin-top: 30px;
+            padding: 25px;
+            border-radius: 15px;
+            animation: fadeIn 0.5s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .result-container.success {
+            background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
+            border: 2px solid #28a745;
+            display: block;
+        }
+
+        .result-container.fail {
+            background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%);
+            border: 2px solid #dc3545;
+            display: block;
+        }
+
+        .result-container.loading {
+            background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%);
+            border: 2px solid #ffc107;
+            display: block;
+        }
+
+        .result-title {
+            font-size: 1.4em;
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        .result-item {
+            margin: 15px 0;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.7);
+            border-radius: 8px;
+        }
+
+        .result-label {
+            font-weight: bold;
+            color: #667eea;
+            margin-bottom: 5px;
+        }
+
+        .result-value {
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .confidence-bar {
+            width: 100%;
+            height: 20px;
+            background: #e0e0e0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+
+        .confidence-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.5s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 0.85em;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .connection-status {
+            text-align: center;
+            padding: 10px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            font-size: 0.9em;
+        }
+
+        .connection-status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .connection-status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .api-notice {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            color: #856404;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🏛️ 文物/艺术品图片识别系统</h1>
+        <p class="subtitle">基于 Qwen-VL-Plus 多模态大模型</p>
+
+        <div id="connectionStatus" class="connection-status disconnected">
+            ⚪ 未连接服务器
+        </div>
+
+        <div id="apiNotice" class="api-notice" style="display: none;">
+            ⚠️ 请设置 DASHSCOPE_API_KEY 环境变量以使用识别功能
+        </div>
+
+        <div class="upload-area" id="uploadArea">
+            <div class="upload-icon">📷</div>
+            <div class="upload-text">
+                点击选择文件或拖拽图片到此处<br>
+                <span>支持 JPG、PNG、GIF 格式</span>
+            </div>
+        </div>
+
+        <input type="file" id="fileInput" accept="image/*">
+
+        <div class="preview-container" id="previewContainer">
+            <img id="imagePreview" alt="预览图片">
+        </div>
+
+        <button class="btn" id="recognizeBtn" disabled>开始识别</button>
+
+        <div class="result-container" id="resultContainer">
+            <div class="spinner" id="loadingSpinner"></div>
+            <div id="resultContent"></div>
+        </div>
+    </div>
+
+    <script>
+        // WebSocket 连接
+        let socket = null;
+        let isConnected = false;
+
+        function connectWebSocket() {
+            socket = io.connect('http://' + window.location.host);
+
+            socket.on('connect', function() {
+                isConnected = true;
+                updateConnectionStatus('connected', '🟢 已连接服务器');
+            });
+
+            socket.on('disconnect', function() {
+                isConnected = false;
+                updateConnectionStatus('disconnected', '⚪ 未连接服务器');
+            });
+
+            socket.on('recognition_result', function(result) {
+                handleRecognitionResult(result);
+            });
+        }
+
+        function updateConnectionStatus(status, text) {
+            const statusEl = document.getElementById('connectionStatus');
+            statusEl.className = 'connection-status ' + status;
+            statusEl.textContent = text;
+        }
+
+        // DOM 元素
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
+        const previewContainer = document.getElementById('previewContainer');
+        const imagePreview = document.getElementById('imagePreview');
+        const recognizeBtn = document.getElementById('recognizeBtn');
+        const resultContainer = document.getElementById('resultContainer');
+        const resultContent = document.getElementById('resultContent');
+        const loadingSpinner = document.getElementById('loadingSpinner');
+
+        let selectedFile = null;
+
+        // 点击上传区域
+        uploadArea.addEventListener('click', function() {
+            fileInput.click();
+        });
+
+        // 文件选择
+        fileInput.addEventListener('change', function(e) {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        // 拖拽上传
+        uploadArea.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', function() {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', function(e) {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) {
+                handleFile(e.dataTransfer.files[0]);
+            }
+        });
+
+        // 处理文件
+        function handleFile(file) {
+            if (!file.type.startsWith('image/')) {
+                alert('请选择图片文件！');
+                return;
+            }
+
+            selectedFile = file;
+            const reader = new FileReader();
+
+            reader.onload = function(e) {
+                imagePreview.src = e.target.result;
+                previewContainer.classList.add('show');
+                recognizeBtn.disabled = false;
+                resultContainer.style.display = 'none';
+            };
+
+            reader.readAsDataURL(file);
+        }
+
+        // 开始识别
+        recognizeBtn.addEventListener('click', function() {
+            if (!selectedFile || !isConnected) {
+                alert('请先选择图片并确保已连接服务器！');
+                return;
+            }
+
+            // 显示加载状态
+            resultContainer.className = 'result-container loading';
+            resultContainer.style.display = 'block';
+            loadingSpinner.style.display = 'block';
+            resultContent.innerHTML = '<p>正在识别中，请稍候...</p>';
+            recognizeBtn.disabled = true;
+
+            // 读取文件为 base64
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                const base64Data = e.target.result;
+                // 通过 WebSocket 发送识别请求
+                socket.emit('recognize_image', { image: base64Data });
+            };
+            reader.readAsDataURL(selectedFile);
+        });
+
+        // 处理识别结果
+        function handleRecognitionResult(result) {
+            loadingSpinner.style.display = 'none';
+            recognizeBtn.disabled = false;
+
+            if (result.success) {
+                resultContainer.className = 'result-container success';
+                resultContent.innerHTML = `
+                    <div class="result-title">✅ 识别成功</div>
+                    <div class="result-item">
+                        <div class="result-label">📛 名称</div>
+                        <div class="result-value">${escapeHtml(result.name)}</div>
+                    </div>
+                    <div class="result-item">
+                        <div class="result-label">📜 背景介绍</div>
+                        <div class="result-value">${escapeHtml(result.background)}</div>
+                    </div>
+                    <div class="result-item">
+                        <div class="result-label">📊 置信度</div>
+                        <div class="confidence-bar">
+                            <div class="confidence-fill" style="width: ${result.confidence}%">
+                                ${result.confidence}%
+                            </div>
+                        </div>
+                    </div>
+                `;
+            } else {
+                resultContainer.className = 'result-container fail';
+                resultContent.innerHTML = `
+                    <div class="result-title">❌ ${escapeHtml(result.message)}</div>
+                    ${result.confidence !== undefined ? `
+                    <div class="result-item">
+                        <div class="result-label">📊 置信度</div>
+                        <div class="confidence-bar">
+                            <div class="confidence-fill" style="width: ${result.confidence}%; background: #dc3545;">
+                                ${result.confidence}%
+                            </div>
+                        </div>
+                    </div>
+                    ` : ''}
+                `;
+            }
+        }
+
+        // HTML 转义
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // 页面加载时连接 WebSocket
+        connectWebSocket();
+    </script>
+</body>
+</html>
