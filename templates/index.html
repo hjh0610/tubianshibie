@@ -295,6 +295,11 @@
                 updateConnectionStatus('disconnected', '⚪ 未连接服务器');
             });
 
+            socket.on('connect_error', function(err) {
+                isConnected = false;
+                updateConnectionStatus('disconnected', '🔴 连接失败：' + err.message);
+            });
+
             socket.on('recognition_result', function(result) {
                 handleRecognitionResult(result);
             });
@@ -369,6 +374,15 @@
         }
 
         // 开始识别
+        let watchdogTimer = null;
+
+        function clearWatchdog() {
+            if (watchdogTimer) {
+                clearTimeout(watchdogTimer);
+                watchdogTimer = null;
+            }
+        }
+
         recognizeBtn.addEventListener('click', function() {
             if (!selectedFile || !isConnected) {
                 alert('请先选择图片并确保已连接服务器！');
@@ -382,6 +396,17 @@
             resultContent.innerHTML = '<p>正在识别中，请稍候...</p>';
             recognizeBtn.disabled = true;
 
+            // 看门狗：后端硬超时为 90 秒，这里留 30 秒余量兜住网络与消息传递环节，
+            // 保证任何异常情况下页面都不会无限停在加载态。
+            clearWatchdog();
+            watchdogTimer = setTimeout(function() {
+                watchdogTimer = null;
+                handleRecognitionResult({
+                    success: false,
+                    message: '等待服务器响应超时，请重试'
+                });
+            }, 120000);
+
             // 读取文件为 base64
             const reader = new FileReader();
             reader.onload = function(e) {
@@ -389,13 +414,28 @@
                 // 通过 WebSocket 发送识别请求
                 socket.emit('recognize_image', { image: base64Data });
             };
+            reader.onerror = function() {
+                handleRecognitionResult({
+                    success: false,
+                    message: '读取图片失败，请换一张图片重试'
+                });
+            };
             reader.readAsDataURL(selectedFile);
         });
 
         // 处理识别结果
         function handleRecognitionResult(result) {
+            clearWatchdog();
             loadingSpinner.style.display = 'none';
             recognizeBtn.disabled = false;
+
+            // 防御性处理：确保 confidence 是有效数值
+            let confidence = result.confidence;
+            if (confidence === undefined || confidence === null || isNaN(confidence)) {
+                confidence = 0;
+            }
+            // 限制在 0-100 范围内
+            confidence = Math.max(0, Math.min(100, Number(confidence)));
 
             if (result.success) {
                 resultContainer.className = 'result-container success';
@@ -403,35 +443,36 @@
                     <div class="result-title">✅ 识别成功</div>
                     <div class="result-item">
                         <div class="result-label">📛 名称</div>
-                        <div class="result-value">${escapeHtml(result.name)}</div>
+                        <div class="result-value">${escapeHtml(result.name || '未知')}</div>
                     </div>
                     <div class="result-item">
                         <div class="result-label">📜 背景介绍</div>
-                        <div class="result-value">${escapeHtml(result.background)}</div>
+                        <div class="result-value">${escapeHtml(result.background || '无背景信息')}</div>
                     </div>
                     <div class="result-item">
                         <div class="result-label">📊 置信度</div>
                         <div class="confidence-bar">
-                            <div class="confidence-fill" style="width: ${result.confidence}%">
-                                ${result.confidence}%
+                            <div class="confidence-fill" style="width: ${confidence}%">
+                                ${confidence}%
                             </div>
                         </div>
                     </div>
                 `;
             } else {
                 resultContainer.className = 'result-container fail';
-                resultContent.innerHTML = `
-                    <div class="result-title">❌ ${escapeHtml(result.message)}</div>
-                    ${result.confidence !== undefined ? `
+                const confidenceHtml = confidence > 0 ? `
                     <div class="result-item">
                         <div class="result-label">📊 置信度</div>
                         <div class="confidence-bar">
-                            <div class="confidence-fill" style="width: ${result.confidence}%; background: #dc3545;">
-                                ${result.confidence}%
+                            <div class="confidence-fill" style="width: ${confidence}%; background: #dc3545;">
+                                ${confidence}%
                             </div>
                         </div>
                     </div>
-                    ` : ''}
+                ` : '';
+                resultContent.innerHTML = `
+                    <div class="result-title">❌ ${escapeHtml(result.message || '识别失败')}</div>
+                    ${confidenceHtml}
                 `;
             }
         }

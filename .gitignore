@@ -1,0 +1,12 @@
+# 密钥文件，绝不提交
+api_key.txt
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 运行时临时图片
+uploads/
+
+# 工具产生的临时文件
+.qwen/

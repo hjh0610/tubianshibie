@@ -3,19 +3,36 @@
 """
 import os
 import base64
-import json
-from flask import Flask, render_template, request
+import uuid
+import concurrent.futures
+from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
+from werkzeug.utils import secure_filename
 from dashscope import MultiModalConversation
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'secret!'
-socketio = SocketIO(app, cors_allowed_origins="*")
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 限制上传文件大小为 16MB
+# engineio 默认 max_http_buffer_size 只有 1MB，超过后 socket.io 会静默丢弃整条消息，
+# 服务端事件处理器不会被调用，前端因此永远等不到 recognition_result。
+socketio = SocketIO(app, cors_allowed_origins="*", max_http_buffer_size=32 * 1024 * 1024)
+
+# 调用大模型的硬超时（秒）。前端有看门狗，后端必须保证任何情况下都能返回。
+API_TIMEOUT_SECONDS = 90
+QWEN_MODEL = 'qwen3-vl-plus'
+# 置信度阈值：模型确定程度 高=95 / 中=70 / 低=40，超过此值才判定识别成功
+MIN_CONFIDENCE = 60
 
 # 配置上传文件夹
 UPLOAD_FOLDER = 'uploads'
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+
+def allowed_file(filename):
+    """检查文件扩展名是否允许"""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 # Qwen-VL 模型配置 - 从 api_key.txt 文件或环境变量读取
 def load_api_key():
@@ -32,6 +49,19 @@ def load_api_key():
     return os.environ.get('DASHSCOPE_API_KEY', '')
 
 QWEN_API_KEY = load_api_key()
+
+
+def check_api_key():
+    """检查 API Key 是否已配置"""
+    if not QWEN_API_KEY:
+        print('错误：未设置 DASHSCOPE_API_KEY')
+        print('请通过以下任一方式配置：')
+        print('  1. 在 api_key.txt 文件中添加：DASHSCOPE_API_KEY=your_api_key')
+        print('  2. 设置环境变量：')
+        print('     Windows: set DASHSCOPE_API_KEY=your_api_key')
+        print('     Linux/Mac: export DASHSCOPE_API_KEY=your_api_key')
+        return False
+    return True
 
 
 def image_to_base64(image_path):
@@ -80,13 +110,29 @@ def recognize_artifact(image_path):
             ]
         }]
         
-        # 调用 Qwen-VL-Plus 模型
-        response = MultiModalConversation.call(
-            model='qwen-vl-plus',
-            messages=messages,
-            api_key=QWEN_API_KEY
-        )
-        
+        # dashscope 的 call() 不接受 timeout 关键字参数（会被当作模型参数吞掉），
+        # 因此用线程池加硬超时，保证任何情况下都能在 API_TIMEOUT_SECONDS 内返回结果。
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                MultiModalConversation.call,
+                model=QWEN_MODEL,
+                messages=messages,
+                api_key=QWEN_API_KEY
+            )
+            try:
+                response = future.result(timeout=API_TIMEOUT_SECONDS)
+            except concurrent.futures.TimeoutError:
+                return {
+                    'success': False,
+                    'message': f'识别超时（超过 {API_TIMEOUT_SECONDS} 秒），请稍后重试'
+                }
+
+        if response is None:
+            return {
+                'success': False,
+                'message': 'API 返回为空，请检查网络连接后重试'
+            }
+
         if response.status_code == 200:
             result_content = response.output.choices[0].message.content
 
@@ -140,8 +186,8 @@ def recognize_artifact(image_path):
                     'message': '无法识别'
                 }
 
-            # 判断置信度是否高于 90%
-            if confidence > 90:
+            # 置信度达到阈值才视为识别成功
+            if confidence > MIN_CONFIDENCE:
                 print('判定：识别成功')
                 return {
                     'success': True,
@@ -157,7 +203,7 @@ def recognize_artifact(image_path):
                     'name': name,
                     'background': background,
                     'confidence': confidence,
-                    'message': '无法识别（置信度低于 90%）'
+                    'message': f'无法识别（置信度低于 {MIN_CONFIDENCE}%）'
                 }
         else:
             return {
@@ -182,25 +228,29 @@ def index():
 def upload_file():
     """处理文件上传（HTTP 方式）"""
     if 'file' not in request.files:
-        return json.dumps({'success': False, 'message': '没有文件上传'}), 400
+        return jsonify({'success': False, 'message': '没有文件上传'}), 400
     
     file = request.files['file']
     if file.filename == '':
-        return json.dumps({'success': False, 'message': '文件名为空'}), 400
+        return jsonify({'success': False, 'message': '文件名为空'}), 400
     
-    if file:
-        # 保存文件
-        filename = file.filename
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
-        
-        # 进行识别
+    if not allowed_file(file.filename):
+        return jsonify({'success': False, 'message': '不支持的文件类型，仅支持 png/jpg/jpeg/gif/webp'}), 400
+    
+    # 使用 secure_filename 防止路径穿越，并加 UUID 避免冲突
+    filename = secure_filename(file.filename)
+    filename = f"{uuid.uuid4().hex}_{filename}"
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    file.save(filepath)
+    
+    try:
         result = recognize_artifact(filepath)
-        
-        # 清理上传的文件
-        os.remove(filepath)
-        
-        return json.dumps(result)
+    finally:
+        # 确保临时文件被清理
+        if os.path.exists(filepath):
+            os.remove(filepath)
+    
+    return jsonify(result)
 
 
 @socketio.on('connect')
@@ -229,22 +279,20 @@ def handle_recognize(data):
             })
             return
         
-        # 保存临时文件
-        import base64
+        # 保存临时文件（使用 UUID 避免并发冲突）
         image_bytes = base64.b64decode(image_data.split(',')[1] if ',' in image_data else image_data)
-        filename = f"temp_{request.sid}.jpg"
+        filename = f"temp_{uuid.uuid4().hex}.jpg"
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         
         with open(filepath, 'wb') as f:
             f.write(image_bytes)
         
-        # 进行识别
-        result = recognize_artifact(filepath)
+        try:
+            result = recognize_artifact(filepath)
+        finally:
+            if os.path.exists(filepath):
+                os.remove(filepath)
         
-        # 清理临时文件
-        os.remove(filepath)
-        
-        # 发送结果
         emit('recognition_result', result)
         
     except Exception as e:
@@ -256,12 +304,11 @@ def handle_recognize(data):
 
 if __name__ == '__main__':
     # 检查 API 密钥
-    if not QWEN_API_KEY:
-        print('警告：未设置 DASHSCOPE_API_KEY 环境变量')
-        print('请运行以下命令设置 API 密钥:')
-        print('  Windows: set DASHSCOPE_API_KEY=your_api_key')
-        print('  Linux/Mac: export DASHSCOPE_API_KEY=your_api_key')
+    if not check_api_key():
+        print('\n服务器启动失败，请先配置 API 密钥')
+        exit(1)
     
+    print('✓ API 密钥已配置')
     print('启动文物/艺术品识别服务器...')
     print('访问地址：http://127.0.0.1:5000')
     socketio.run(app, debug=True, host='0.0.0.0', port=5000)
